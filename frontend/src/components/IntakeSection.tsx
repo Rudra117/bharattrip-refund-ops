@@ -24,6 +24,7 @@ export const IntakeSection: React.FC = () => {
   const [presets, setPresets] = useState<PresetsResponse | null>(null);
   const [message, setMessage] = useState('');
   const [channel, setChannel] = useState('Email');
+  const [messageDate, setMessageDate] = useState<string>('2026-06-05');
   const [isTyping, setIsTyping] = useState(false);
   const [result, setResult] = useState<IntakeResponse | null>(null);
   const [copied, setCopied] = useState(false);
@@ -37,6 +38,7 @@ export const IntakeSection: React.FC = () => {
         if (p?.preset_a) {
           setMessage(p.preset_a.text || '');
           setChannel(p.preset_a.channel || 'Email');
+          setMessageDate(p.preset_a.date || '2026-06-05');
         }
       })
       .catch((err) => console.error('Presets error:', err));
@@ -45,6 +47,7 @@ export const IntakeSection: React.FC = () => {
   const handleApplyPreset = (preset: Preset) => {
     setMessage(preset.text || '');
     if (preset.channel) setChannel(preset.channel);
+    if (preset.date) setMessageDate(preset.date);
     setResult(null);
   };
 
@@ -60,7 +63,7 @@ export const IntakeSection: React.FC = () => {
       const res = await submitIntake({
         message,
         channel,
-        date: '2026-06-30',
+        date: messageDate || '2026-06-30',
       });
 
       // Typing animation delay for realistic agent feel
@@ -89,6 +92,13 @@ export const IntakeSection: React.FC = () => {
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-semibold bg-signal-green-dim text-signal-green border border-signal-green-border">
             <CheckCircle2 className="w-3.5 h-3.5" />
             Unique Ledger Match
+          </span>
+        );
+      case 'POSSIBLE_MATCH_LOW_CONFIDENCE':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-semibold bg-amber-dim text-amber border border-amber-border">
+            <HelpCircle className="w-3.5 h-3.5" />
+            Possible Match (Low Confidence - Clarification Requested)
           </span>
         );
       case 'AMBIGUOUS':
@@ -314,13 +324,17 @@ export const IntakeSection: React.FC = () => {
                     Parsed Structured Entities
                   </span>
                   <div className="flex items-center gap-2">
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-medium ${
+                    <span
+                      title={(result.parsed as any).fallback_reason ? `Fallback reason: ${(result.parsed as any).fallback_reason}` : undefined}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-medium ${
                       (result.parsed as any).parser_engine === 'gemini' || (result.parsed as any).engine === 'gemini'
                         ? 'bg-signal-green-dim text-signal-green border border-signal-green-border'
                         : 'bg-amber-dim text-amber border border-amber-border'
                     }`}>
-                      {(result.parsed as any).engine_chip ||
-                        ((result.parsed as any).parser_engine === 'gemini' ? 'Parsed by Gemini' : 'Rules fallback')}
+                      {(result.parsed as any).fallback_reason
+                        ? `Rules fallback: ${(result.parsed as any).fallback_reason}`
+                        : ((result.parsed as any).engine_chip ||
+                            ((result.parsed as any).parser_engine === 'gemini' ? 'Parsed by Gemini' : 'Rules fallback'))}
                     </span>
                     <span className="text-xs font-mono text-fg-faint">
                       Channel: {result.parsed.channel}
@@ -497,6 +511,36 @@ export const IntakeSection: React.FC = () => {
                     <p className="text-fg-muted text-[11px] leading-relaxed">
                       No matching record found in either tracker. Ticket initialized with non-colliding <strong>RF-NEW-###</strong> prefix, assigned to Support triage queue with status <em>Working</em>.
                     </p>
+                  </div>
+                )}
+
+                {/* If Possible Match (Low Confidence - Clarification Requested) */}
+                {((result.match.match_status === 'POSSIBLE_MATCH_LOW_CONFIDENCE') || (result.match.match_type === 'POSSIBLE_MATCH_LOW_CONFIDENCE')) && (
+                  <div className="space-y-3">
+                    <div className="p-3.5 rounded bg-amber-dim/30 border border-amber/40 text-xs font-mono space-y-2">
+                      <div className="font-bold text-amber flex items-center gap-1.5">
+                        <HelpCircle className="w-4 h-4" />
+                        Plausibility Guard: Clarification Requested
+                      </div>
+                      <p className="text-fg-muted text-[11px] leading-relaxed">
+                        An earlier transaction was located on this sector, but due to elapsed time (&gt;45 days) or contradictory status, no status is asserted without agency confirmation.
+                      </p>
+                      {((result.match as any).candidate_note || (result.match.candidates?.[0] as any)?.plain_note) && (
+                        <div className="p-2 rounded bg-ink-card border border-ink-border text-amber text-[11px]">
+                          <strong>Observation:</strong> {(result.match as any).candidate_note || (result.match.candidates?.[0] as any)?.plain_note}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="p-3.5 rounded bg-signal-blue-dim border border-signal-blue-border text-xs font-mono text-signal-blue space-y-1">
+                      <div className="font-bold flex items-center gap-1.5">
+                        <Layers className="w-4 h-4" />
+                        New Intake Ticket Created: {result.match.new_ticket_id || (result.match as any).new_ticket?.clean_id || 'RF-NEW-001'}
+                      </div>
+                      <p className="text-fg-muted text-[11px] leading-relaxed">
+                        Ticket initialized with non-colliding <strong>RF-NEW-###</strong> prefix and marked <em>logged via intake</em>. Support will verify the exact PNR / booking reference with the agency.
+                      </p>
+                    </div>
                   </div>
                 )}
               </div>

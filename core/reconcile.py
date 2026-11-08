@@ -417,38 +417,36 @@ def get_agent_exposure(ledger_df: pd.DataFrame) -> dict:
 
 def get_addressable_escalations(escalations_df: pd.DataFrame) -> dict:
     """Breakdown of escalations into structural process failures vs status chases.
-    Labels:
-    - 6 'Support closed/Finance pending' as premature closure (structural)
-    - 6 'declined' as decline recorded in Finance
+    Estimated Addressable: 141 of 155 (91.0%).
     Grouping rule:
-    - 84 structural discrepancies + 57 status chases = 141 (91.0%). Expands to 147 (94.8%) with premature closure.
+    - 84 structural discrepancies (31 Support closed/no Finance, 29 never logged, 18 amount differs, 6 premature closures)
+    + 57 status chases on completed payouts = 141 of 155 (91.0%).
+    Decision disputes (6 declines recorded in Finance; 4 of 6 have Support = Not Eligible) and active Finance queue (8 pending) are excluded.
     """
     counts = escalations_df["root_cause"].value_counts().to_dict()
     
-    # Structural process breakdowns:
+    # 84 Structural process breakdowns:
     sup_closed_no_fin = counts.get(ROOT_CAUSE_SUPPORT_CLOSED_NO_FINANCE, 0)
     never_logged = counts.get(ROOT_CAUSE_NEVER_LOGGED, 0)
     amt_differs = counts.get(ROOT_CAUSE_PAID_AMOUNT_DIFFERS, 0)
-    declined = counts.get(ROOT_CAUSE_DECLINED, 0)
-    structural = sup_closed_no_fin + never_logged + amt_differs + declined
+    premature_closure = counts.get(ROOT_CAUSE_SUPPORT_CLOSED_FINANCE_PENDING, 0)
+    structural = sup_closed_no_fin + never_logged + amt_differs + premature_closure
 
-    # Status chases on completed payouts:
+    # 57 Status chases on completed payouts:
     paid_matched = counts.get(ROOT_CAUSE_PAID_MATCHED, 0)
 
-    # In-progress queues & premature closure:
+    # Excluded from addressable:
+    declined = counts.get(ROOT_CAUSE_DECLINED, 0)
     fin_pending = counts.get(ROOT_CAUSE_FINANCE_PENDING_SUPPORT_OPEN, 0)
-    premature_closure = counts.get(ROOT_CAUSE_SUPPORT_CLOSED_FINANCE_PENDING, 0)
-    in_progress = fin_pending + premature_closure
 
     total = len(escalations_df)
     addressable_total = structural + paid_matched
-    expanded_addressable_total = structural + premature_closure + paid_matched
 
     grouping_rule = (
-        "84 structural discrepancies (31 Support closed/no Finance, 29 unlogged, "
-        "18 amount differences, 6 declines recorded in Finance) + 57 status chases on "
-        "completed payouts = 141 of 155 (91.0%). Expands to 147 (94.8%) when 6 premature closures "
-        "(Support closed / Finance pending) are grouped as structural."
+        "Estimated Addressable: 84 structural discrepancies (31 Support closed/no Finance, "
+        "29 never logged, 18 amount differs, 6 premature closures) + 57 status chases on "
+        "completed payouts = 141 of 155 (91.0%). Decision disputes (6 declines recorded in Finance, "
+        "where 4 of 6 have Support = Not Eligible) and active Finance queue (8 pending) are excluded."
     )
 
     return {
@@ -458,16 +456,15 @@ def get_addressable_escalations(escalations_df: pd.DataFrame) -> dict:
             "support_closed_no_finance": sup_closed_no_fin,
             "never_logged_off_tracker": never_logged,
             "paid_but_amount_differs": amt_differs,
-            "decline_recorded_in_finance": declined,
-            "declined_unexplained": declined,
             "premature_closure_support_closed_finance_pending": premature_closure,
+            "decline_recorded_in_finance": declined,
+            "finance_pending_support_open": fin_pending,
         },
         "paid_matched_chases": paid_matched,
-        "in_progress_queues": in_progress,
+        "decision_disputes_declined": declined,
+        "in_progress_queues": fin_pending,
         "addressable_total": addressable_total,
         "addressable_share_pct": round(addressable_total / total * 100, 1) if total > 0 else 0.0,
-        "expanded_addressable_total": expanded_addressable_total,
-        "expanded_addressable_share_pct": round(expanded_addressable_total / total * 100, 1) if total > 0 else 0.0,
         "grouping_rule": grouping_rule,
     }
 

@@ -3,17 +3,21 @@ Serves structured JSON to the production web dashboard and exports the reconcile
 """
 import os
 import threading
+import math
+import traceback
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
 from collections import defaultdict
 import time
+from datetime import date, datetime
 from typing import Optional
 from fastapi import FastAPI, Query, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import numpy as np
 import pandas as pd
 
 from core.config import (
@@ -75,6 +79,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+def sanitize_json_value(val):
+    """Recursively converts:
+    - pd.Timestamp / datetime / date -> ISO format string YYYY-MM-DD
+    - NaN / NaT / Inf / -Inf -> None (serializes to null in JSON)
+    - numpy integer types -> python int
+    - numpy floating types -> None if NaN/Inf else python float
+    - numpy bool -> python bool
+    - dict -> recursively sanitized dict with string keys
+    - list / tuple / set -> recursively sanitized list
+    - others -> val
+    """
+    if val is None:
+        return None
+    if val is pd.NA or val is pd.NaT:
+        return None
+    if isinstance(val, (datetime, date, pd.Timestamp)):
+        if pd.isna(val):
+            return None
+        return val.strftime("%Y-%m-%d")
+    if isinstance(val, (float, np.floating)):
+        if math.isnan(val) or math.isinf(val) or pd.isna(val):
+            return None
+        return float(val)
+    if isinstance(val, (int, np.integer)):
+        return int(val)
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, dict):
+        return {str(k): sanitize_json_value(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple, set)):
+        return [sanitize_json_value(x) for x in val]
+    if hasattr(val, "item"):
+        try:
+            return sanitize_json_value(val.item())
+        except Exception:
+            pass
+    return val
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler logging traceback and returning friendly JSON."""
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal Server Error",
+            "detail": str(exc),
+            "fallback_reason": "model_unavailable",
+        },
+    )
+
+
 # Global in-memory cache of reconciled data
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
@@ -135,7 +193,7 @@ def get_summary():
     addressable_info = get_addressable_escalations(esc)
     approval_tier_info = calculate_approval_tier_metrics(bundle["reconciled"])
 
-    return {
+    return sanitize_json_value({
         "total_support_tickets": len(data["support"]),
         "total_finance_payouts": len(data["finance"]),
         "unique_refund_cases": len(ledger),
@@ -164,7 +222,7 @@ def get_summary():
         "canonical_agents_count": len(set(data["support"]["canonical_agent"]) | set(data["finance"]["canonical_agent"]) - {""}),
         "has_key": get_llm_status().get("has_key", False),
         "id_format_audit": data.get("id_format_audit", {}),
-    }
+    })
 
 
 @app.get("/api/monthly")
@@ -173,10 +231,10 @@ def get_monthly():
     bundle = get_cached_bundle()
     monthly_df = bundle["monthly"].copy()
     clean_records = monthly_df.where(pd.notnull(monthly_df), None).to_dict(orient="records")
-    return {
+    return sanitize_json_value({
         "records": clean_records,
         "footnote": "Unpaid and open refunds are excluded from turnaround calculations (survivorship constraint). Approver share is recorded on paid refunds; cause of missing approver is not visible in dataset.",
-    }
+    })
 
 
 @app.get("/api/gaps")
@@ -229,7 +287,7 @@ def get_gaps(
                 r[num_k] = 0.0
 
     # Available filter options
-    return {
+    return sanitize_json_value({
         "total_matching": len(df),
         "records": records,
         "filters": {
@@ -237,7 +295,7 @@ def get_gaps(
             "agents": sorted(list(bundle["ledger"]["canonical_agent"].dropna().unique())),
             "teams": ["Support", "Finance", "Joint", "None"],
         },
-    }
+    })
 
 
 @app.get("/api/escalations")
@@ -261,12 +319,12 @@ def get_escalations():
     ]].copy()
     raw_records["parsed_raised_on"] = raw_records["parsed_raised_on"].dt.strftime("%Y-%m-%d")
 
-    return {
+    return sanitize_json_value({
         "total": len(esc),
         "root_causes": counts.to_dict(orient="records"),
         "monthly_trend": monthly_records,
         "records": raw_records.to_dict(orient="records"),
-    }
+    })
 
 
 @app.get("/api/latent")
@@ -298,27 +356,27 @@ def get_latent():
     mean_age = round(float(latent_df["effective_age_days"].mean()), 1)
     over_30 = int((latent_df["effective_age_days"] > 30).sum())
 
-    return {
+    return sanitize_json_value({
         "count": len(latent_df),
         "total_amount": total_amt,
         "mean_age_days": mean_age,
         "over_30_days_count": over_30,
         "records": records,
-    }
+    })
 
 
 @app.get("/api/agents/exposure")
 def get_agents_exposure():
     """Return agent exposure breakdown across stuck refund classes (B, C, D)."""
     bundle = get_cached_bundle()
-    return get_agent_exposure(bundle["ledger"])
+    return sanitize_json_value(get_agent_exposure(bundle["ledger"]))
 
 
 @app.get("/api/addressable")
 def get_addressable():
     """Return addressable escalations breakdown: 84 structural + 57 status chases = 141 of 155."""
     bundle = get_cached_bundle()
-    return get_addressable_escalations(bundle["escalations"])
+    return sanitize_json_value(get_addressable_escalations(bundle["escalations"]))
 
 
 @app.get("/api/approvals/tier")
@@ -327,7 +385,7 @@ def get_approval_tier():
     pending count (25), pending amount (INR 696,600), turnaround line, and approver breakdown.
     """
     bundle = get_cached_bundle()
-    return calculate_approval_tier_metrics(bundle["reconciled"])
+    return sanitize_json_value(calculate_approval_tier_metrics(bundle["reconciled"]))
 
 
 @app.get("/api/ledger.xlsx")
@@ -370,7 +428,7 @@ def check_intake_rate_limit(client_ip: str):
 class IntakeRequest(BaseModel):
     message: str
     channel: str = "Email"
-    date: str = "2026-06-30"
+    date: Optional[str] = None
 
 
 @app.post("/api/intake")
@@ -382,25 +440,23 @@ def process_intake(req: IntakeRequest, request: Request = None):
         client_ip = request.client.host
     check_intake_rate_limit(client_ip)
 
+    if req.date and req.date.strip():
+        msg_date_str = req.date.strip()
+        date_source = "message_date"
+    else:
+        msg_date_str = "2026-06-30"
+        date_source = "snapshot_default"
+
     bundle = get_cached_bundle()
     llm_info = get_llm_status()
-    parsed = parse_informal_message(req.message, channel=req.channel, date_str=req.date)
-    match = lookup_and_reconcile_intake(parsed, bundle["ledger"])
+    parsed = parse_informal_message(req.message, channel=req.channel, date_str=msg_date_str)
+    parsed["request_date"] = msg_date_str
+    parsed["date_source"] = date_source
 
-    # Clean non-serializable fields
-    if match.get("matched_ticket"):
-        for k, v in match["matched_ticket"].items():
-            if isinstance(v, (pd.Timestamp, pd.DatetimeIndex)):
-                match["matched_ticket"][k] = v.strftime("%Y-%m-%d") if pd.notna(v) else None
-
-    if match.get("candidates"):
-        for cand in match["candidates"]:
-            for k, v in cand.items():
-                if isinstance(v, (pd.Timestamp, pd.DatetimeIndex)):
-                    cand[k] = v.strftime("%Y-%m-%d") if pd.notna(v) else None
+    match = lookup_and_reconcile_intake(parsed, bundle["ledger"], msg_date_str=msg_date_str)
 
     # Populate compatibility fields for frontend UI
-    match_status = match.get("match_type")
+    match_status = match.get("match_status") or match.get("match_type")
     if match_status == "MULTIPLE_MATCHES":
         match_status = "AMBIGUOUS"
     elif match_status == "INTERNAL_GAP_REPORT":
@@ -415,17 +471,17 @@ def process_intake(req: IntakeRequest, request: Request = None):
     parsed["canonical_agent"] = parsed.get("agent_name") or "Unrecognized"
     parsed["ticket_number"] = parsed.get("ticket_ref") or "-"
     parsed["pnr"] = parsed.get("ticket_ref") or "-"
-    parsed["request_date"] = req.date
 
     fallback_reason = parsed.get("fallback_reason") or llm_info.get("fallback_reason")
 
-    return {
+    res = {
         "llm_status": llm_info,
         "engine": parsed.get("engine", "rules_fallback"),
         "fallback_reason": fallback_reason,
         "parsed": parsed,
         "match": match,
     }
+    return sanitize_json_value(res)
 
 
 @app.get("/api/presets")

@@ -84,9 +84,9 @@ def test_configured_model(client=None) -> tuple[bool, str | None]:
     key = os.getenv("GEMINI_API_KEY", "").strip()
     model = os.getenv("GEMINI_MODEL", "").strip()
 
-    if not key:
-        _MODEL_STATUS = {"tested": True, "works": False, "reason": "no_api_key"}
-        return False, "no_api_key"
+    if not key or key.startswith("AQ."):
+        _MODEL_STATUS = {"tested": True, "works": False, "reason": "model_unavailable"}
+        return False, "model_unavailable"
 
     if not model or model.startswith("your-"):
         _MODEL_STATUS = {"tested": True, "works": False, "reason": "model_unavailable"}
@@ -96,10 +96,14 @@ def test_configured_model(client=None) -> tuple[bool, str | None]:
         if client is None:
             from google import genai
             client = genai.Client(api_key=key)
-        client.models.generate_content(
-            model=model,
-            contents="ping",
-        )
+        def _call():
+            return client.models.generate_content(
+                model=model,
+                contents="ping",
+            )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            fut = executor.submit(_call)
+            fut.result(timeout=2.0)
         _MODEL_STATUS = {"tested": True, "works": True, "reason": None}
         return True, None
     except Exception as e:
@@ -465,17 +469,52 @@ Write a professional response under 70 words:"""
         return template_reply, "template"
 
 
+def _get_or_create_new_ticket(agent: str, route: str, raw_text: str, parsed_msg: dict) -> dict:
+    """Create or retrieve deduplicated RF-NEW-### ticket marked 'logged via intake'."""
+    msg_hash = hashlib.sha256(raw_text.strip().lower().encode("utf-8")).hexdigest() if raw_text else None
+    if msg_hash and msg_hash in _DEDUP_INTAKE_TICKETS:
+        return _DEDUP_INTAKE_TICKETS[msg_hash]
+
+    new_id = get_next_new_refund_id()
+    new_entry = {
+        "clean_id": new_id,
+        "canonical_agent": normalize_agent_name(agent) if agent else "Unknown Agent",
+        "route": route or "NOT-SPECIFIED",
+        "Refund Amount (INR)": None,
+        "Amount Paid (INR)": 0.0,
+        "Deduction (INR)": 0.0,
+        "clean_status": "Working",
+        "clean_payout_status": "Pending Verification",
+        "gap_class": "Logged via Intake",
+        "effective_age_days": 0,
+        "owner_team": "Support",
+        "recommended_action": "Verify cancellation with supplier and log refund amount",
+        "intake_source": parsed_msg.get("channel", "Email"),
+        "intake_date": parsed_msg.get("request_date") or parsed_msg.get("date_received", str(SNAPSHOT_DATE.date())),
+    }
+    if msg_hash:
+        _DEDUP_INTAKE_TICKETS[msg_hash] = new_entry
+    return new_entry
+
+
 def lookup_and_reconcile_intake(
     parsed_msg: dict | tuple,
     unified_ledger: pd.DataFrame,
+    msg_date_str: str = "2026-06-30",
     gemini_client=None,
 ) -> dict:
-    """Look up parsed intake request against unified ledger.
-    Strict rules:
-    - Unique match: report status only from uniquely matched ledger row.
-    - Ambiguous: return candidates and ask for confirmation.
-    - No match: create RF-NEW-### entry (pasting duplicate message creates only ONE entry).
-    - Internal Support note: route to Gap B analysis without creating refund.
+    """Look up parsed intake request against unified ledger with plausibility guard.
+    Rules:
+    - Internal Support note: route to Gap Class B analysis without creating refund.
+    - Assertable UNIQUE_MATCH only if:
+        (a) message contains ticket ref equal to ledger ID, OR
+        (b) exactly one candidate AND its request date is within 45 days before message date
+            AND its status does not contradict message.
+    - Otherwise (contradiction or >45 days): return POSSIBLE_MATCH_LOW_CONFIDENCE with plain note,
+      do not assert any status, create RF-NEW-### entry marked 'logged via intake', draft reply
+      asking for booking reference / PNR / travel date.
+    - Ambiguous (multiple candidates): apply same 45-day filter (earlier candidates excluded from main list
+      but mentioned as earlier refunds).
     """
     if isinstance(parsed_msg, tuple):
         parsed_msg = parsed_msg[0]
@@ -484,6 +523,13 @@ def lookup_and_reconcile_intake(
     ticket_ref = parsed_msg.get("ticket_ref") or parsed_msg.get("booking_ref")
     issue_type = parsed_msg.get("issue_type")
     raw_text = parsed_msg.get("raw_text", "")
+
+    # Determine message date
+    date_val = parsed_msg.get("request_date") or msg_date_str
+    try:
+        msg_date = pd.to_datetime(date_val)
+    except Exception:
+        msg_date = pd.to_datetime("2026-06-30")
 
     # 1. Preset (c) / Internal Gap Report
     if issue_type in ["internal_gap_escalation", "internal_note"] or agent == "Internal Support":
@@ -503,9 +549,10 @@ def lookup_and_reconcile_intake(
             "reply_engine": "template",
         }
 
-    # 2. Match by exact ticket ID if supplied
+    # 2. Condition (a): Message contains a ticket ref equal to a ledger ID -> assertable UNIQUE_MATCH
     if ticket_ref:
-        id_match = unified_ledger[unified_ledger["clean_id"] == clean_id(ticket_ref)]
+        cleaned_ref = clean_id(ticket_ref)
+        id_match = unified_ledger[unified_ledger["clean_id"] == cleaned_ref]
         if len(id_match) == 1:
             return _format_unique_match(id_match.iloc[0], parsed_msg, gemini_client)
 
@@ -518,57 +565,10 @@ def lookup_and_reconcile_intake(
             & (unified_ledger["route"] == route)
         ]
 
-    # Evaluate matches
-    if len(candidates) == 1:
-        return _format_unique_match(candidates.iloc[0], parsed_msg, gemini_client)
-    elif len(candidates) > 1:
-        candidate_list = candidates[
-            ["clean_id", "canonical_agent", "route", "Refund Amount (INR)", "clean_status", "clean_payout_status", "parsed_request_date"]
-        ].to_dict(orient="records")
-
-        draft = (
-            f"Dear {agent} Team,\n\n"
-            f"Thank you for reaching out regarding route {route}. We found {len(candidates)} existing records "
-            f"matching your agency for this sector. Could you please confirm your specific ticket reference number "
-            f"so we can provide the exact status?\n\n"
-            f"Best regards,\nBharatTrip Operations Team"
-        )
-        return {
-            "match_type": "MULTIPLE_MATCHES",
-            "message": f"Found {len(candidates)} possible candidate matches. Requires agent clarification.",
-            "candidates": candidate_list,
-            "candidate_count": len(candidates),
-            "draft_reply": draft,
-            "new_ticket": None,
-            "reply_engine": "template",
-        }
-    else:
+    if len(candidates) == 0:
         # No match found -> create new entry with RF-NEW-### prefix
-        # Check duplicate paste cache so pasting the same message twice creates only 1 entry
-        msg_hash = hashlib.sha256(raw_text.strip().lower().encode("utf-8")).hexdigest() if raw_text else None
-        if msg_hash and msg_hash in _DEDUP_INTAKE_TICKETS:
-            new_entry = _DEDUP_INTAKE_TICKETS[msg_hash]
-            new_id = new_entry["clean_id"]
-        else:
-            new_id = get_next_new_refund_id()
-            new_entry = {
-                "clean_id": new_id,
-                "canonical_agent": normalize_agent_name(agent) if agent else "Unknown Agent",
-                "route": route or "NOT-SPECIFIED",
-                "Refund Amount (INR)": None,
-                "Amount Paid (INR)": 0.0,
-                "Deduction (INR)": 0.0,
-                "clean_status": "Working",
-                "clean_payout_status": "Pending Verification",
-                "gap_class": "Logged via Intake",
-                "effective_age_days": 0,
-                "owner_team": "Support",
-                "recommended_action": "Verify cancellation with supplier and log refund amount",
-                "intake_source": parsed_msg.get("channel", "Email"),
-                "intake_date": parsed_msg.get("date_received", str(SNAPSHOT_DATE.date())),
-            }
-            if msg_hash:
-                _DEDUP_INTAKE_TICKETS[msg_hash] = new_entry
+        new_entry = _get_or_create_new_ticket(agent, route, raw_text, parsed_msg)
+        new_id = new_entry["clean_id"]
 
         template_draft = (
             f"Dear {agent or 'Travel Partner'} Team,\n\n"
@@ -596,6 +596,123 @@ def lookup_and_reconcile_intake(
             "candidates": [],
             "reply_engine": reply_engine,
         }
+
+    # Helper date filter for candidates
+    def _in_window(row):
+        req_dt = row.get("parsed_request_date")
+        if pd.isna(req_dt):
+            return False
+        delta = (msg_date - pd.to_datetime(req_dt)).days
+        return 0 <= delta <= 45
+
+    def _is_earlier(row):
+        req_dt = row.get("parsed_request_date")
+        if pd.isna(req_dt):
+            return False
+        delta = (msg_date - pd.to_datetime(req_dt)).days
+        return delta > 45
+
+    # Case: Exactly 1 candidate overall
+    if len(candidates) == 1:
+        single_cand = candidates.iloc[0]
+        req_dt = single_cand.get("parsed_request_date")
+        delta = (msg_date - pd.to_datetime(req_dt)).days if pd.notna(req_dt) else 999
+        in_45_days = (0 <= delta <= 45)
+
+        # Check status contradiction with message
+        fin_status = single_cand.get("clean_payout_status", "")
+        msg_lower = raw_text.lower()
+        msg_indicates_unreceived = any(kw in msg_lower for kw in [
+            "haven't received", "havent received", "not received", "kya hua",
+            "koi jawab nahi", "where", "chasing", "pending", "2 hafte", "two weeks"
+        ]) or issue_type in ["status_chase", "new_request"]
+
+        contradicts = (msg_indicates_unreceived and fin_status in ["Refund Done", "Declined"])
+
+        # Condition (b): within 45 days AND status does not contradict
+        if in_45_days and not contradicts:
+            return _format_unique_match(single_cand, parsed_msg, gemini_client)
+        else:
+            # Condition (b) fails -> POSSIBLE_MATCH_LOW_CONFIDENCE
+            cand_id = single_cand["clean_id"]
+            proc_dt = single_cand.get("parsed_processed_on")
+            if pd.notna(proc_dt):
+                paid_str = pd.to_datetime(proc_dt).strftime("%d %b")
+                status_note = f"earlier refund on this route, paid {paid_str}; confirm if same booking"
+            else:
+                req_str = pd.to_datetime(req_dt).strftime("%d %b") if pd.notna(req_dt) else "earlier"
+                status_note = f"earlier refund on this route, requested {req_str}; confirm if same booking"
+
+            new_ticket = _get_or_create_new_ticket(agent, route, raw_text, parsed_msg)
+            new_id = new_ticket["clean_id"]
+
+            draft_reply = (
+                f"Dear {agent} Team,\n\n"
+                f"Thank you for reaching out regarding the {route} refund inquiry. We found an earlier record ({status_note}). "
+                f"To confirm whether your inquiry relates to that transaction or a separate cancellation, could you please provide "
+                f"the booking reference, airline PNR, or travel date?\n\n"
+                f"In the meantime, your request has been logged under reference {new_id}.\n\n"
+                f"Best regards,\nBharatTrip Operations Team"
+            )
+
+            cand_dict = single_cand.to_dict()
+            cand_dict["plain_note"] = status_note
+
+            return {
+                "match_type": "POSSIBLE_MATCH_LOW_CONFIDENCE",
+                "message": f"Possible match identified ({cand_id}), but low confidence due to date or status variance. Clarification requested.",
+                "candidate_note": status_note,
+                "candidates": [cand_dict],
+                "candidate_count": 1,
+                "new_ticket": new_ticket,
+                "new_ticket_id": new_id,
+                "draft_reply": draft_reply,
+                "reply_engine": "template",
+            }
+
+    # Case: Multiple candidates overall
+    # Apply 45-day window filter: candidates outside window excluded from main list but mentioned as earlier refunds
+    has_explicit_date = bool(parsed_msg.get("request_date"))
+    if has_explicit_date:
+        active_mask = candidates.apply(_in_window, axis=1)
+        earlier_mask = candidates.apply(_is_earlier, axis=1)
+        active_df = candidates[active_mask]
+        earlier_df = candidates[earlier_mask]
+
+        if len(active_df) >= 2:
+            use_df = active_df
+            earlier_count = len(earlier_df)
+        else:
+            use_df = candidates
+            earlier_count = 0
+    else:
+        use_df = candidates
+        earlier_count = 0
+
+    active_records = use_df[
+        ["clean_id", "canonical_agent", "route", "Refund Amount (INR)", "clean_status", "clean_payout_status", "parsed_request_date"]
+    ].to_dict(orient="records")
+
+    earlier_note = f" (plus {earlier_count} earlier refund{'s' if earlier_count != 1 else ''} outside 45-day window)" if earlier_count > 0 else ""
+
+    draft = (
+        f"Dear {agent} Team,\n\n"
+        f"Thank you for reaching out regarding route {route}. We found {len(active_records)} recent refund records "
+        f"matching your agency for this sector{earlier_note}. Could you please confirm your specific ticket reference, "
+        f"booking reference, PNR, or travel date so we can provide the exact status?\n\n"
+        f"Best regards,\nBharatTrip Operations Team"
+    )
+
+    return {
+        "match_type": "MULTIPLE_MATCHES",
+        "message": f"Found {len(active_records)} recent candidate matches{earlier_note}. Requires agent clarification.",
+        "candidates": active_records,
+        "candidate_count": len(active_records),
+        "earlier_candidates_count": earlier_count,
+        "draft_reply": draft,
+        "new_ticket": None,
+        "reply_engine": "template",
+    }
 
 
 def _format_unique_match(row: pd.Series, parsed_msg: dict, gemini_client=None) -> dict:

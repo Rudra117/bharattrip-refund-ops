@@ -1,7 +1,11 @@
 """API endpoint validation tests asserting exact parity with known-answer ground truth.
 """
+import json
+import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from api import (
+    app,
     get_summary,
     get_monthly,
     get_gaps,
@@ -14,7 +18,15 @@ from api import (
     get_approval_tier,
     check_intake_rate_limit,
     IntakeRequest,
+    PRESET_A,
+    PRESET_B,
+    PRESET_C,
 )
+
+
+@pytest.fixture(scope="module")
+def api_client():
+    return TestClient(app)
 
 
 def test_api_summary_ground_truth():
@@ -123,25 +135,96 @@ def test_api_intake_endpoints():
     """Assert POST /api/intake functions for presets."""
     # Preset (a)
     req_a = IntakeRequest(
-        message="Hi, I cancelled booking for DEL-DXB last week and was told I'd get a refund. I haven't received anything and I don't have any reference number. Please help, my client is asking.",
-        channel="Email",
-        date="2026-06-05",
+        message=PRESET_A["text"],
+        channel=PRESET_A["channel"],
+        date=PRESET_A["date"],
     )
     res_a = process_intake(req_a)
     assert res_a["parsed"]["agent_name"] == "Peak Journeys"
     assert res_a["parsed"]["route"] == "DEL-DXB"
+    assert res_a["match"]["match_type"] == "MULTIPLE_MATCHES"
+    assert res_a["match"]["match_status"] == "AMBIGUOUS"
+    assert res_a["match"]["candidate_count"] == 3
+
+    # Preset (b) - Plausibility guard test: never asserts 'Refund Done'
+    req_b = IntakeRequest(
+        message=PRESET_B["text"],
+        channel=PRESET_B["channel"],
+        date=PRESET_B["date"],
+    )
+    res_b = process_intake(req_b)
+    assert res_b["parsed"]["agent_name"] == "Nomad Travel"
+    assert res_b["parsed"]["route"] == "BLR-MAA"
+    assert res_b["match"]["match_type"] == "POSSIBLE_MATCH_LOW_CONFIDENCE"
+    assert res_b["match"]["match_status"] == "POSSIBLE_MATCH_LOW_CONFIDENCE"
+    assert "Refund Done" not in res_b["match"]["draft_reply"]
+    assert "disbursed" not in res_b["match"]["draft_reply"].lower()
+    assert res_b["match"]["new_ticket_id"] is not None
 
     # Preset (c)
     req_c = IntakeRequest(
-        message="Finance says they never received several of the refunds I closed last month. I marked them done on my side. Not sure where they went.",
-        channel="Email",
-        date="2026-06-11",
+        message=PRESET_C["text"],
+        channel=PRESET_C["channel"],
+        date=PRESET_C["date"],
     )
     res_c = process_intake(req_c)
     assert res_c["match"]["match_type"] == "INTERNAL_GAP_REPORT"
     assert res_c["match"]["gap_b_count"] == 69
     assert res_c["match"]["gap_b_sum"] == 1080700.0
     assert res_c["match"]["new_ticket"] is None
+
+
+@pytest.mark.parametrize("scenario,payload,expected_match_type", [
+    ("preset_a", {"message": PRESET_A["text"], "channel": PRESET_A["channel"], "date": PRESET_A["date"]}, "MULTIPLE_MATCHES"),
+    ("preset_b", {"message": PRESET_B["text"], "channel": PRESET_B["channel"], "date": PRESET_B["date"]}, "POSSIBLE_MATCH_LOW_CONFIDENCE"),
+    ("preset_c", {"message": PRESET_C["text"], "channel": PRESET_C["channel"], "date": PRESET_C["date"]}, "INTERNAL_GAP_REPORT"),
+    ("unique_match_with_matching_ref", {"message": "Please share status on RF-1023 regarding flight refund.", "channel": "Email", "date": "2026-06-15"}, "UNIQUE_MATCH"),
+])
+def test_api_intake_testclient_parametrised(api_client, scenario, payload, expected_match_type):
+    """Test POST /api/intake with TestClient parametrised across presets and matching ref."""
+    response = api_client.post("/api/intake", json=payload)
+    assert response.status_code == 200, f"Expected 200 for {scenario}, got {response.status_code}: {response.text}"
+
+    # Assert JSON-serialisable output
+    data = response.json()
+    assert isinstance(data, dict)
+    assert json.dumps(data, allow_nan=False)
+
+    match = data["match"]
+    assert match["match_type"] == expected_match_type
+
+    if scenario == "preset_b":
+        draft = match["draft_reply"]
+        assert "Refund Done" not in draft
+        assert "has been processed and disbursed" not in draft
+        assert match["match_status"] == "POSSIBLE_MATCH_LOW_CONFIDENCE"
+        assert match.get("new_ticket_id") is not None
+        assert "candidate_note" in match or "plain_note" in match["candidates"][0]
+
+    elif scenario == "preset_a":
+        assert match["match_status"] == "AMBIGUOUS"
+        assert len(match["candidates"]) == 3
+
+    elif scenario == "preset_c":
+        assert match["gap_b_count"] == 69
+        assert match["gap_b_sum"] == 1080700.0
+
+
+def test_api_intake_candidate_with_nan_fields(api_client):
+    """Assert candidate tickets with NaN priority_score / NaT dates serialize safely via JSON."""
+    response = api_client.post("/api/intake", json={
+        "message": PRESET_B["text"],
+        "channel": PRESET_B["channel"],
+        "date": PRESET_B["date"],
+    })
+    assert response.status_code == 200
+    data = response.json()
+    serialized_str = json.dumps(data, allow_nan=False)
+    assert "NaN" not in serialized_str
+    assert "Infinity" not in serialized_str
+    candidates = data["match"].get("candidates", [])
+    assert len(candidates) >= 1
+    assert candidates[0].get("priority_score") is None
 
 
 def test_api_latent_endpoint():
@@ -175,6 +258,8 @@ def test_api_addressable_escalations_endpoint():
     assert res["addressable_share_pct"] == 91.0
     assert res["structural_failure_count"] == 84
     assert res["paid_matched_chases"] == 57
+    assert "147" not in res.get("grouping_rule", "")
+    assert "94.8" not in res.get("grouping_rule", "")
 
 
 def test_api_intake_rate_limiting():

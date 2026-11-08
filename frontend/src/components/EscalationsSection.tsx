@@ -273,7 +273,7 @@ export const EscalationsSection: React.FC<EscalationsSectionProps> = ({ escalati
             <span>Estimated Addressable: 141 of {escalations.total} (91.0%)</span>
           </div>
           <p className="text-xs text-fg-muted max-w-3xl leading-relaxed">
-            <strong className="text-fg-primary">Grouping Rule:</strong> 84 structural discrepancies (31 Support closed/no Finance + 29 never logged off-tracker + 18 amount differences + 6 declines recorded in Finance) + 57 status chases on completed payouts = 141 of {escalations.total} (91.0%). Expands to 147 (94.8%) when 6 premature closures (Support closed / Finance pending) are grouped as structural.
+            <strong className="text-fg-primary">Grouping Rule:</strong> 84 structural discrepancies (31 Support closed/no Finance + 29 never logged off-tracker + 18 amount differences + 6 premature closures [Support closed / Finance pending]) + 57 status chases on completed payouts = 141 of {escalations.total} (91.0%), shown as an estimate. Decision disputes (6 declines recorded in Finance, where 4 of 6 have Support = Not Eligible) and active Finance queue (8 pending) are excluded.
           </p>
         </div>
         <div className="flex items-center gap-2 font-mono text-xs flex-shrink-0">
