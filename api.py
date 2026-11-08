@@ -477,6 +477,7 @@ def process_intake(req: IntakeRequest, request: Request = None):
     res = {
         "llm_status": llm_info,
         "engine": parsed.get("engine", "rules_fallback"),
+        "engine_model": parsed.get("engine_model"),
         "fallback_reason": fallback_reason,
         "parsed": parsed,
         "match": match,

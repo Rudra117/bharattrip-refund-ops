@@ -170,6 +170,7 @@ export interface ParsedMessage {
   refund_amount: number | null;
   channel: string;
   raw_message: string;
+  engine_model?: string | null;
 }
 
 export interface IntakeMatch {
@@ -187,6 +188,9 @@ export interface IntakeMatch {
 
 export interface IntakeResponse {
   llm_status: LLMStatus;
+  engine?: string;
+  engine_model?: string | null;
+  fallback_reason?: string | null;
   parsed: ParsedMessage;
   match: IntakeMatch;
 }

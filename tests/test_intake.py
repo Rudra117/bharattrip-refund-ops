@@ -136,3 +136,97 @@ def test_live_gemini_engine():
         channel="Email",
     )
     assert parsed.get("engine") == "gemini"
+
+
+class MockResponse:
+    def __init__(self, text: str):
+        self.text = text
+
+
+def test_gemini_503_retry_and_fallback_to_next_model(monkeypatch):
+    """Test HTTP 503 from primary model retries once after 1s, then tries next model in GEMINI_FALLBACK_MODELS and succeeds."""
+    import json
+    import time
+    monkeypatch.setenv("GEMINI_API_KEY", "mock-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-primary")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-fallback-1,gemini-fallback-2")
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    calls = []
+
+    class MockModels:
+        def generate_content(self, model: str, contents: str):
+            calls.append(model)
+            if model == "gemini-primary":
+                err = Exception("503 Service Unavailable")
+                err.status_code = 503
+                raise err
+            elif model == "gemini-fallback-1":
+                data = {
+                    "agent_name": "Peak Journeys",
+                    "route": "DEL-DXB",
+                    "ticket_ref": "RF-1023",
+                    "channel": "Email",
+                    "issue_type": "status_chase",
+                    "language_detected": "English",
+                    "urgency": "High",
+                    "confidence": 0.95,
+                }
+                return MockResponse(json.dumps(data))
+            raise Exception("Unexpected model called")
+
+    class MockClient:
+        def __init__(self):
+            self.models = MockModels()
+
+    mock_client = MockClient()
+
+    res = parse_informal_message(
+        "Hi, inquiring about DEL-DXB refund for Peak Journeys RF-1023",
+        channel="Email",
+        gemini_client=mock_client,
+    )
+
+    assert res["engine"] == "gemini"
+    assert res["engine_model"] == "gemini-fallback-1"
+    assert res["agent_name"] == "Peak Journeys"
+    assert res["route"] == "DEL-DXB"
+    assert res["ticket_ref"] == "RF-1023"
+    assert calls == ["gemini-primary", "gemini-primary", "gemini-fallback-1"]
+
+
+def test_gemini_all_503_falls_back_to_rules(monkeypatch):
+    """Test that if all models fail with HTTP 503 (including retries), it falls back to rules parser."""
+    import time
+    monkeypatch.setenv("GEMINI_API_KEY", "mock-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-primary")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "gemini-fallback-1")
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    calls = []
+
+    class MockModels:
+        def generate_content(self, model: str, contents: str):
+            calls.append(model)
+            err = Exception("503 Service Unavailable")
+            err.code = 503
+            raise err
+
+    class MockClient:
+        def __init__(self):
+            self.models = MockModels()
+
+    mock_client = MockClient()
+
+    res = parse_informal_message(
+        "Hi, I cancelled booking for DEL-DXB last week and was told I'd get a refund. I haven't received anything and I don't have any reference number. Please help, my client is asking.",
+        channel="Email",
+        gemini_client=mock_client,
+    )
+
+    assert res["engine"] == "rules_fallback"
+    assert res["engine_model"] is None
+    assert res["fallback_reason"] == "model_unavailable"
+    assert res["agent_name"] == "Peak Journeys"
+    assert res["route"] == "DEL-DXB"
+    assert calls == ["gemini-primary", "gemini-primary", "gemini-fallback-1", "gemini-fallback-1"]

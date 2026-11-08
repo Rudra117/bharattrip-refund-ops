@@ -250,6 +250,18 @@ def parse_informal_message_rules(text: str, channel: str = "Email", date_str: st
     }
 
 
+def _is_retriable_error(exc: Exception) -> bool:
+    """Check if exception represents HTTP 503 (Unavailable) or 429 (Rate Limit / ResourceExhausted)."""
+    for attr in ("code", "status_code", "http_status", "status"):
+        val = getattr(exc, attr, None)
+        if val in (429, 503, "429", "503"):
+            return True
+        if hasattr(val, "value") and getattr(val, "value", None) in (429, 503):
+            return True
+    err_str = str(exc).lower()
+    return any(marker in err_str for marker in ("503", "429", "unavailable", "resource_exhausted", "resourceexhausted", "too many requests"))
+
+
 def _call_gemini_json(client, model_name: str, prompt: str, timeout: float = 8.0) -> dict:
     """Invoke Gemini model requesting strict JSON with timeout."""
     def _execute():
@@ -277,30 +289,36 @@ def parse_informal_message(
 ) -> dict:
     """Parse informal message into structured schema using Gemini if available, otherwise rule-based.
     GEMINI_MODEL is read strictly from env only (no hardcoded default of any 1.x/2.0 model).
-    If model is unavailable, surfaces fallback_reason 'model_unavailable'.
+    On HTTP 503 or 429 from Gemini, retry once after 1 second, then try the next model in
+    GEMINI_FALLBACK_MODELS (comma-separated env var).
+    Total time budget: 10 seconds.
+    Reports which model answered in the response (engine_model) or None for rules fallback.
     """
     key = os.getenv("GEMINI_API_KEY", "").strip()
-    model = os.getenv("GEMINI_MODEL", "").strip()
+    primary_model = os.getenv("GEMINI_MODEL", "").strip()
+    fallback_models_str = os.getenv("GEMINI_FALLBACK_MODELS", "").strip()
+    fallback_models = [m.strip() for m in fallback_models_str.split(",") if m.strip()]
 
-    # Model must come from environment only
-    if not model or model.startswith("your-"):
-        rules_res = parse_informal_message_rules(text, channel, date_str)
-        rules_res["engine"] = "rules_fallback"
-        rules_res["parser_engine"] = "rules_fallback"
-        rules_res["engine_chip"] = "Rules fallback"
-        rules_res["fallback_reason"] = "model_unavailable"
-        return rules_res
+    # Collect candidate models in order: primary model, then fallback models
+    models_to_try = []
+    if primary_model and not primary_model.startswith("your-"):
+        models_to_try.append(primary_model)
+    for fm in fallback_models:
+        if fm not in models_to_try and not fm.startswith("your-"):
+            models_to_try.append(fm)
 
-    if not key or key.startswith("AQ."):
-        rules_res = parse_informal_message_rules(text, channel, date_str)
-        rules_res["engine"] = "rules_fallback"
-        rules_res["parser_engine"] = "rules_fallback"
-        rules_res["engine_chip"] = "Rules fallback"
-        rules_res["fallback_reason"] = "model_unavailable"
-        return rules_res
-
-    # Check model availability via test call
+    # When no mock client passed, enforce API key and model presence
     if gemini_client is None:
+        if not models_to_try or not key or key.startswith("AQ."):
+            rules_res = parse_informal_message_rules(text, channel, date_str)
+            rules_res["engine"] = "rules_fallback"
+            rules_res["parser_engine"] = "rules_fallback"
+            rules_res["engine_chip"] = "Rules fallback"
+            rules_res["fallback_reason"] = "model_unavailable"
+            rules_res["engine_model"] = None
+            return rules_res
+
+        # Check model availability via test call
         works, reason = test_configured_model()
         if not works:
             rules_res = parse_informal_message_rules(text, channel, date_str)
@@ -308,16 +326,29 @@ def parse_informal_message(
             rules_res["parser_engine"] = "rules_fallback"
             rules_res["engine_chip"] = "Rules fallback"
             rules_res["fallback_reason"] = "model_unavailable"
+            rules_res["engine_model"] = None
             return rules_res
+    else:
+        # gemini_client passed directly (e.g. in mocked tests)
+        if not models_to_try:
+            models_to_try = ["gemini-mock"]
 
     if (key or gemini_client) and text.strip():
-        try:
-            client = gemini_client
-            if client is None:
+        client = gemini_client
+        if client is None:
+            try:
                 from google import genai
                 client = genai.Client(api_key=key)
+            except Exception:
+                rules_res = parse_informal_message_rules(text, channel, date_str)
+                rules_res["engine"] = "rules_fallback"
+                rules_res["parser_engine"] = "rules_fallback"
+                rules_res["engine_chip"] = "Rules fallback"
+                rules_res["fallback_reason"] = "model_unavailable"
+                rules_res["engine_model"] = None
+                return rules_res
 
-            prompt = f"""You are an operational assistant at BharatTrip travel company.
+        prompt = f"""You are an operational assistant at BharatTrip travel company.
 Parse the following refund communication message into a strictly valid JSON object.
 Return ONLY valid JSON with exactly these keys:
 - agent_name: string (canonical travel agency name or detected name, or "Unknown Agent")
@@ -332,47 +363,68 @@ Return ONLY valid JSON with exactly these keys:
 Message:
 \"\"\"{text}\"\"\"
 """
-            result = _call_gemini_json(client, model, prompt, timeout=8.0)
+        start_time = time.monotonic()
+        TOTAL_TIME_BUDGET = 10.0
 
-            # Validate schema
-            required_keys = {"agent_name", "route", "ticket_ref", "channel", "issue_type", "language_detected", "urgency", "confidence"}
-            if not required_keys.issubset(result.keys()):
-                raise ValueError("Missing keys in Gemini JSON output")
+        for curr_model in models_to_try:
+            for attempt in range(2):  # attempt 0: initial call, attempt 1: retry after 1s
+                elapsed = time.monotonic() - start_time
+                remaining = TOTAL_TIME_BUDGET - elapsed
+                if remaining <= 0.1:
+                    break
 
-            # Route standardization
-            if result.get("route"):
-                m = re.search(r"([a-zA-Z]{3})[-/]([a-zA-Z]{3})", str(result["route"]))
-                result["route"] = f"{m.group(1).upper()}-{m.group(2).upper()}" if m else None
+                try:
+                    call_timeout = min(8.0, remaining)
+                    result = _call_gemini_json(client, curr_model, prompt, timeout=call_timeout)
 
-            # Ticket ref standardization
-            if result.get("ticket_ref"):
-                result["ticket_ref"] = clean_id(str(result["ticket_ref"]))
-            result["booking_ref"] = result.get("ticket_ref")
+                    # Validate schema
+                    required_keys = {"agent_name", "route", "ticket_ref", "channel", "issue_type", "language_detected", "urgency", "confidence"}
+                    if not required_keys.issubset(result.keys()):
+                        raise ValueError("Missing keys in Gemini JSON output")
 
-            result["channel"] = channel or result.get("channel", "Email")
-            result["summary"] = text[:120].strip() + ("..." if len(text) > 120 else "")
-            result["raw_text"] = text
-            result["engine"] = "gemini"
-            result["parser_engine"] = "gemini"
-            result["engine_chip"] = "Parsed by Gemini"
-            result["fallback_reason"] = None
+                    # Route standardization
+                    if result.get("route"):
+                        m = re.search(r"([a-zA-Z]{3})[-/]([a-zA-Z]{3})", str(result["route"]))
+                        result["route"] = f"{m.group(1).upper()}-{m.group(2).upper()}" if m else None
 
-            return result
+                    # Ticket ref standardization
+                    if result.get("ticket_ref"):
+                        result["ticket_ref"] = clean_id(str(result["ticket_ref"]))
+                    result["booking_ref"] = result.get("ticket_ref")
 
-        except Exception:
-            rules_res = parse_informal_message_rules(text, channel, date_str)
-            rules_res["engine"] = "rules_fallback"
-            rules_res["parser_engine"] = "rules_fallback"
-            rules_res["engine_chip"] = "Rules fallback"
-            rules_res["fallback_reason"] = "model_unavailable"
-            return rules_res
+                    result["channel"] = channel or result.get("channel", "Email")
+                    result["summary"] = text[:120].strip() + ("..." if len(text) > 120 else "")
+                    result["raw_text"] = text
+                    result["engine"] = "gemini"
+                    result["parser_engine"] = "gemini"
+                    result["engine_model"] = curr_model
+                    result["engine_chip"] = f"Parsed by Gemini ({curr_model})"
+                    result["fallback_reason"] = None
 
-    # Default rules parser when no key
+                    return result
+
+                except Exception as exc:
+                    if _is_retriable_error(exc) and attempt == 0:
+                        # HTTP 503 or 429 on initial attempt: retry once after 1 second
+                        if (time.monotonic() - start_time) + 1.0 < TOTAL_TIME_BUDGET:
+                            time.sleep(1.0)
+                            continue
+                        else:
+                            break
+                    else:
+                        # Attempt 1 (retry) failed, or non-retriable: break to try next model
+                        break
+
+            if time.monotonic() - start_time >= TOTAL_TIME_BUDGET:
+                break
+
+    # Default rules parser when all models fail or budget exhausted
     rules_res = parse_informal_message_rules(text, channel, date_str)
     rules_res["engine"] = "rules_fallback"
     rules_res["parser_engine"] = "rules_fallback"
     rules_res["engine_chip"] = "Rules fallback"
     rules_res["fallback_reason"] = "model_unavailable"
+    rules_res["engine_model"] = None
     return rules_res
 
 

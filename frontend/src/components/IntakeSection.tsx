@@ -325,7 +325,13 @@ export const IntakeSection: React.FC = () => {
                   </span>
                   <div className="flex items-center gap-2">
                     <span
-                      title={(result.parsed as any).fallback_reason ? `Fallback reason: ${(result.parsed as any).fallback_reason}` : undefined}
+                      title={
+                        (result.parsed as any).fallback_reason
+                          ? `Fallback reason: ${(result.parsed as any).fallback_reason}`
+                          : ((result.parsed as any).engine_model || (result as any).engine_model)
+                          ? `Model: ${(result.parsed as any).engine_model || (result as any).engine_model}`
+                          : undefined
+                      }
                       className={`px-2 py-0.5 rounded text-[10px] font-mono font-medium ${
                       (result.parsed as any).parser_engine === 'gemini' || (result.parsed as any).engine === 'gemini'
                         ? 'bg-signal-green-dim text-signal-green border border-signal-green-border'
