@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  
+  html.light {
+    color-scheme: light;
+  }
+
+  body {
+    @apply font-body bg-ink text-fg-primary antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  html.light body {
+    @apply bg-paper text-fg-primary-light;
+  }
+
+  /* Space Grotesk for headings */
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-heading tracking-tight;
+  }
+
+  /* JetBrains Mono with tabular figures for numbers */
+  .font-mono,
+  .tabular-nums {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1E2630;
+  border-radius: 4px;
+}
+
+.light ::-webkit-scrollbar-thumb {
+  background: #D5CECE;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2D3748;
+}
+
+/* Subtle line draw-in animation */
+@keyframes drawLine {
+  from {
+    stroke-dashoffset: 1000;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animate-draw-line {
+  stroke-dasharray: 1000;
+  animation: drawLine 2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Pulse beacon */
+@keyframes beacon {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(1.15);
+  }
+}
+
+.animate-beacon {
+  animation: beacon 2.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Light Mode Overrides: Paper Theme (#FAF8F4) */
+html.light,
+html.light body,
+html.light div.min-h-screen {
+  background-color: #FAF8F4 !important;
+  color: #14181F !important;
+}
+
+html.light .bg-ink,
+html.light .bg-ink\/80,
+html.light .bg-ink\/85,
+html.light .bg-ink\/90 {
+  background-color: #FAF8F4 !important;
+}
+
+html.light .bg-ink-panel,
+html.light .bg-ink-panel\/40 {
+  background-color: #FFFFFF !important;
+}
+
+html.light .bg-ink-card,
+html.light .bg-ink-card\/50,
+html.light .bg-ink-card\/60 {
+  background-color: #F4F1EA !important;
+}
+
+html.light .border-ink-border,
+html.light .border-ink-border\/30,
+html.light .border-ink-border\/40,
+html.light .border-ink-border\/50,
+html.light .border-ink-border\/60,
+html.light .border-ink-border\/70,
+html.light .border-ink-border\/80 {
+  border-color: #E2DDD5 !important;
+}
+
+html.light .divide-ink-border,
+html.light .divide-ink-border\/40,
+html.light .divide-ink-border\/50,
+html.light .divide-ink-border\/60 {
+  border-color: #E2DDD5 !important;
+}
+
+html.light .text-fg-primary {
+  color: #14181F !important;
+}
+
+html.light .text-fg-muted {
+  color: #556070 !important;
+}
+
+html.light .text-fg-faint {
+  color: #7B8698 !important;
+}
+
+html.light .hover\:bg-ink-hover:hover,
+html.light .hover\:bg-ink-hover\/50:hover {
+  background-color: #EDE7DE !important;
+}
+
+html.light input,
+html.light select,
+html.light textarea {
+  background-color: #FFFFFF !important;
+  color: #14181F !important;
+  border-color: #D6D0C5 !important;
+}
+
+html.light thead {
+  background-color: #EFEBE4 !important;
+}
+
