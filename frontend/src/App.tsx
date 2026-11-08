@@ -13,7 +13,15 @@ import { IntakeSection } from './components/IntakeSection';
 import { Footer } from './components/Footer';
 
 export function App() {
-  const [darkMode, setDarkMode] = useState<boolean>(true);
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('theme');
+      if (saved) return saved === 'dark';
+    } catch (e) {
+      // ignore
+    }
+    return true;
+  });
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [monthly, setMonthly] = useState<MonthlyResponse | null>(null);
   const [escalations, setEscalations] = useState<EscalationsResponse | null>(null);
@@ -33,6 +41,11 @@ export function App() {
 
   // Sync dark mode class on document element
   useEffect(() => {
+    try {
+      localStorage.setItem('theme', darkMode ? 'dark' : 'light');
+    } catch (e) {
+      // ignore
+    }
     if (darkMode) {
       document.documentElement.classList.add('dark');
       document.documentElement.classList.remove('light');

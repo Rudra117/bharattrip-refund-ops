@@ -90,61 +90,51 @@
 /* Light Mode Overrides: Paper Theme (#FAF8F4) */
 html.light,
 html.light body,
+html.light #root,
 html.light div.min-h-screen {
   background-color: #FAF8F4 !important;
   color: #14181F !important;
 }
 
-html.light .bg-ink,
-html.light .bg-ink\/80,
-html.light .bg-ink\/85,
-html.light .bg-ink\/90 {
+html.light [class*="bg-ink"] {
   background-color: #FAF8F4 !important;
 }
 
-html.light .bg-ink-panel,
-html.light .bg-ink-panel\/40 {
+html.light [class*="bg-ink-panel"] {
   background-color: #FFFFFF !important;
 }
 
-html.light .bg-ink-card,
-html.light .bg-ink-card\/50,
-html.light .bg-ink-card\/60 {
+html.light [class*="bg-ink-card"] {
   background-color: #F4F1EA !important;
 }
 
-html.light .border-ink-border,
-html.light .border-ink-border\/30,
-html.light .border-ink-border\/40,
-html.light .border-ink-border\/50,
-html.light .border-ink-border\/60,
-html.light .border-ink-border\/70,
-html.light .border-ink-border\/80 {
+html.light [class*="border-ink-border"] {
   border-color: #E2DDD5 !important;
 }
 
-html.light .divide-ink-border,
-html.light .divide-ink-border\/40,
-html.light .divide-ink-border\/50,
-html.light .divide-ink-border\/60 {
+html.light [class*="divide-ink-border"] {
   border-color: #E2DDD5 !important;
 }
 
-html.light .text-fg-primary {
+html.light [class*="text-fg-primary"] {
   color: #14181F !important;
 }
 
-html.light .text-fg-muted {
+html.light [class*="text-fg-muted"] {
   color: #556070 !important;
 }
 
-html.light .text-fg-faint {
+html.light [class*="text-fg-faint"] {
   color: #7B8698 !important;
 }
 
-html.light .hover\:bg-ink-hover:hover,
-html.light .hover\:bg-ink-hover\/50:hover {
+html.light [class*="hover:bg-ink-hover"]:hover {
   background-color: #EDE7DE !important;
+}
+
+html.light nav {
+  background-color: rgba(250, 248, 244, 0.92) !important;
+  border-color: #E2DDD5 !important;
 }
 
 html.light input,
