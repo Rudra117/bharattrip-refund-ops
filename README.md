@@ -14,7 +14,7 @@ pip install -r requirements.txt && python -m uvicorn api:app --port 8000
 # 2. Run complete automated test suite (29 tests verifying ground truth, intake, API, and rendered parity)
 python -m pytest tests/ -v
 
-# Alternative: Run Streamlit dashboard fallback
+# Alternative: Run Streamlit dashboard fallback. Only use this if python -m uvicorn api:app --port 8000 doesnt works
 streamlit run app.py
 ```
 
